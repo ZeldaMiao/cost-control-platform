@@ -198,7 +198,7 @@ prod_var = var_df[
 # ════════════════════════════════════════════════════════════
 # TAB 1：成本预测与差异分析
 # ════════════════════════════════════════════════════════════
-tab1, tab2 = st.tabs(["📈 成本预测与差异分析", "🔧 BOM成本拆解"])
+tab1, tab2, tab3 = st.tabs(["📈 成本分析", "🔧 BOM成本拆解", "🎯 盈亏预测与模拟"])
 
 with tab1:
     s = std_map[selected_product]
@@ -531,501 +531,497 @@ with tab2:
                 delta=f"{'⬆' if impact > 0 else '⬇'} {fmt_money(abs(impact))}")
 
 
-# ════════════════════════════════════════════════════════════
-# 新模块：三个卡片区（在Tabs下方）
-# ════════════════════════════════════════════════════════════
-st.markdown("---")
+with tab3:
+    # ─── 全局参数滑块 ─────────────────────────────────────────
+    st.markdown("### 经营参数设定")
+    st.caption("以下分析基于工厂整体汇总数据，统一毛利率倒推售价")
 
-# ─── 全局参数滑块 ─────────────────────────────────────────
-st.markdown("## 🎯 经营模拟与盈亏分析")
-st.caption("以下分析基于工厂整体汇总数据，统一毛利率倒推售价")
+    col_margin, col_vol, col_mat = st.columns(3)
+    with col_margin:
+        margin_rate = st.slider("毛利率目标", 10, 50, 25, 1,
+                                help="目标毛利率，用于倒推统一售价")
+    with col_vol:
+        vol_factor = st.slider("产量系数", 50, 150, 100, 5,
+                               help="实际产量占标准产能的比例")
+    with col_mat:
+        mat_factor = st.slider("材料价格调整系数", 80, 120, 100, 2,
+                               help="材料价格相对标准的变化")
 
-col_margin, col_vol, col_mat = st.columns(3)
-with col_margin:
-    margin_rate = st.slider("毛利率目标", 10, 50, 25, 1,
-                            help="目标毛利率，用于倒推统一售价")
-with col_vol:
-    vol_factor = st.slider("产量系数", 50, 150, 100, 5,
-                           help="实际产量占标准产能的比例")
-with col_mat:
-    mat_factor = st.slider("材料价格调整系数", 80, 120, 100, 2,
-                           help="材料价格相对标准的变化")
+    margin_pct = margin_rate / 100
+    vol_pct = vol_factor / 100
+    mat_pct = mat_factor / 100
 
-margin_pct = margin_rate / 100
-vol_pct = vol_factor / 100
-mat_pct = mat_factor / 100
+    # ─── 计算工厂整体数据 ─────────────────────────────────────
+    def calc_factory_level(margin_pct, vol_pct, mat_pct):
+        """计算工厂整体盈亏数据"""
+        total_fixed = FIXED_COST_MONTHLY
 
-# ─── 计算工厂整体数据 ─────────────────────────────────────
-def calc_factory_level(margin_pct, vol_pct, mat_pct):
-    """计算工厂整体盈亏数据"""
-    total_fixed = FIXED_COST_MONTHLY
+        products_data = []
+        total_units = 0
+        total_revenue = 0
+        total_variable_cost = 0
+        total_contribution = 0
 
-    products_data = []
-    total_units = 0
-    total_revenue = 0
-    total_variable_cost = 0
-    total_contribution = 0
+        for _, row in std_df.iterrows():
+            pname = row["产品名称"]
+            std_vol = row["标准产量"]
+            mat_std = row["直接材料标准"]
+            lab_std = row["直接人工标准"]
+            var_oh_std = row["变动制造费用标准"]
+            fix_oh_std = row["固定制造费用标准"]
+            total_std = row["标准单位成本"]
 
-    for _, row in std_df.iterrows():
-        pname = row["产品名称"]
-        std_vol = row["标准产量"]
-        mat_std = row["直接材料标准"]
-        lab_std = row["直接人工标准"]
-        var_oh_std = row["变动制造费用标准"]
-        fix_oh_std = row["固定制造费用标准"]
-        total_std = row["标准单位成本"]
+            # 实际产量
+            actual_vol = std_vol * vol_pct
+            # 实际材料成本（考虑材料价格调整）
+            actual_mat = mat_std * mat_pct
+            # 变动成本 = 调整后材料 + 人工 + 变动制造费
+            var_cost_per_unit = actual_mat + lab_std + var_oh_std
+            # 售价 = 标准成本 ÷ (1 - 毛利率)
+            selling_price = total_std / (1 - margin_pct)
+            # 边际贡献
+            cm_per_unit = selling_price - var_cost_per_unit
 
-        # 实际产量
-        actual_vol = std_vol * vol_pct
-        # 实际材料成本（考虑材料价格调整）
-        actual_mat = mat_std * mat_pct
-        # 变动成本 = 调整后材料 + 人工 + 变动制造费
-        var_cost_per_unit = actual_mat + lab_std + var_oh_std
-        # 售价 = 标准成本 ÷ (1 - 毛利率)
-        selling_price = total_std / (1 - margin_pct)
-        # 边际贡献
-        cm_per_unit = selling_price - var_cost_per_unit
+            units = actual_vol
+            revenue = selling_price * units
+            var_cost_total = var_cost_per_unit * units
+            contribution = cm_per_unit * units
 
-        units = actual_vol
-        revenue = selling_price * units
-        var_cost_total = var_cost_per_unit * units
-        contribution = cm_per_unit * units
+            total_units += units
+            total_revenue += revenue
+            total_variable_cost += var_cost_total
+            total_contribution += contribution
 
-        total_units += units
-        total_revenue += revenue
-        total_variable_cost += var_cost_total
-        total_contribution += contribution
+            products_data.append({
+                "产品": pname,
+                "产线": row["产线"],
+                "标准产量": int(std_vol),
+                "实际产量": int(round(units)),
+                "售价": selling_price,
+                "变动成本": var_cost_per_unit,
+                "边际贡献": cm_per_unit,
+                "收入": revenue,
+                "变动成本总额": var_cost_total,
+                "边际贡献总额": contribution,
+            })
 
-        products_data.append({
-            "产品": pname,
-            "产线": row["产线"],
-            "标准产量": int(std_vol),
-            "实际产量": int(round(units)),
-            "售价": selling_price,
-            "变动成本": var_cost_per_unit,
-            "边际贡献": cm_per_unit,
-            "收入": revenue,
-            "变动成本总额": var_cost_total,
-            "边际贡献总额": contribution,
-        })
+        profit = total_contribution - total_fixed
+        # 盈亏平衡计算
+        if total_units > 0:
+            avg_cm = total_contribution / total_units
+            bep_units = total_fixed / avg_cm if avg_cm > 0 else float("inf")
+            bep_revenue = bep_units * (total_revenue / total_units) if total_units > 0 else 0
+        else:
+            avg_cm = 0
+            bep_units = float("inf")
+            bep_revenue = 0
 
-    profit = total_contribution - total_fixed
-    # 盈亏平衡计算
-    if total_units > 0:
-        avg_cm = total_contribution / total_units
-        bep_units = total_fixed / avg_cm if avg_cm > 0 else float("inf")
-        bep_revenue = bep_units * (total_revenue / total_units) if total_units > 0 else 0
-    else:
-        avg_cm = 0
-        bep_units = float("inf")
-        bep_revenue = 0
+        # 产能利用率
+        capacity_util = total_units / MAX_CAPACITY_UNITS * 100
 
-    # 产能利用率
-    capacity_util = total_units / MAX_CAPACITY_UNITS * 100
+        return {
+            "products": products_data,
+            "total_units": total_units,
+            "total_revenue": total_revenue,
+            "total_variable_cost": total_variable_cost,
+            "total_contribution": total_contribution,
+            "total_fixed": total_fixed,
+            "profit": profit,
+            "avg_cm": avg_cm,
+            "bep_units": bep_units,
+            "bep_revenue": bep_revenue,
+            "capacity_util": capacity_util,
+        }
 
-    return {
-        "products": products_data,
-        "total_units": total_units,
-        "total_revenue": total_revenue,
-        "total_variable_cost": total_variable_cost,
-        "total_contribution": total_contribution,
-        "total_fixed": total_fixed,
-        "profit": profit,
-        "avg_cm": avg_cm,
-        "bep_units": bep_units,
-        "bep_revenue": bep_revenue,
-        "capacity_util": capacity_util,
+    factory = calc_factory_level(margin_pct, vol_pct, mat_pct)
+
+
+    # ════════════════════════════════════════════════════════════
+    # 卡片区 1：盈亏平衡分析
+    # ════════════════════════════════════════════════════════════
+    st.markdown("### 📉 盈亏平衡分析")
+
+    # 盈亏平衡核心指标
+    bep_col1, bep_col2, bep_col3, bep_col4 = st.columns(4)
+
+    with bep_col1:
+        st.metric(
+            "盈亏平衡点（产量）",
+            f"{factory['bep_units']:,.0f}" if factory['bep_units'] != float("inf") else "∞",
+            delta=f"产能 {factory['bep_units']/MAX_CAPACITY_UNITS*100:.1f}%" if factory['bep_units'] != float("inf") else None,
+            help="达到此产量时盈亏平衡",
+        )
+
+    with bep_col2:
+        st.metric(
+            "盈亏平衡点（收入）",
+            fmt_money(factory['bep_revenue']) if factory['bep_revenue'] != float("inf") else "∞",
+        )
+
+    with bep_col3:
+        profit_color = "normal" if factory["profit"] >= 0 else "inverse"
+        st.metric(
+            "当月利润",
+            fmt_money(factory["profit"]),
+            delta=f"产量 {factory['total_units']:,.0f} 件",
+            delta_color=profit_color,
+        )
+
+    with bep_col4:
+        util_color = "normal" if factory["capacity_util"] <= 100 else "inverse"
+        util_warning = ""
+        if factory["capacity_util"] > 110:
+            util_warning = "🔴 超红线"
+        elif factory["capacity_util"] > 100:
+            util_warning = "🟠 超产能"
+        st.metric(
+            "产能利用率",
+            f"{factory['capacity_util']:.1f}%",
+            delta=util_warning if util_warning else f"上限 {MAX_CAPACITY_UNITS:,.0f} 件",
+            delta_color=util_color,
+        )
+
+    # 盈亏平衡图
+    st.markdown("#### 盈亏平衡图")
+    st.caption("总收入线 vs 总成本线，交点即为盈亏平衡点。红色竖线 = 产能上限")
+
+    # 生成产量范围（0 ~ 产能上限×1.2）
+    max_x = MAX_CAPACITY_UNITS * 1.2
+    x_units = np.linspace(0, max_x, 200)
+
+    # 总成本 = 固定成本 + 变动成本 × 产量
+    var_cost_per_unit_avg = factory["total_variable_cost"] / factory["total_units"] if factory["total_units"] > 0 else 0
+    total_cost_line = FIXED_COST_MONTHLY + var_cost_per_unit_avg * x_units
+
+    # 总收入 = 售价 × 产量
+    avg_price = factory["total_revenue"] / factory["total_units"] if factory["total_units"] > 0 else 0
+    total_revenue_line = avg_price * x_units
+
+    fig_bep = go.Figure()
+
+    # 总成本线
+    fig_bep.add_trace(go.Scatter(
+        x=x_units, y=total_cost_line,
+        mode="lines", name="总成本",
+        line=dict(color=C["negative"], width=2.5),
+    ))
+
+    # 总收入线
+    fig_bep.add_trace(go.Scatter(
+        x=x_units, y=total_revenue_line,
+        mode="lines", name="总收入",
+        line=dict(color=C["revenue"], width=2.5),
+    ))
+
+    # 固定成本线
+    fig_bep.add_trace(go.Scatter(
+        x=x_units, y=[FIXED_COST_MONTHLY] * len(x_units),
+        mode="lines", name=f"固定成本 ({fmt_money(FIXED_COST_MONTHLY)})",
+        line=dict(color=C["muted"], width=1.5, dash="dot"),
+    ))
+
+    # 盈亏平衡点
+    if factory["bep_units"] != float("inf") and factory["bep_units"] <= max_x:
+        bep_y = FIXED_COST_MONTHLY + var_cost_per_unit_avg * factory["bep_units"]
+        fig_bep.add_trace(go.Scatter(
+            x=[factory["bep_units"]], y=[bep_y],
+            mode="markers+text",
+            name=f"BEP ({factory['bep_units']:,.0f} 件)",
+            marker=dict(symbol="star", size=16, color=C["bep"],
+                        line=dict(width=2, color="white")),
+            text=["BEP"],
+            textposition="top center",
+            textfont=dict(size=14, color=C["bep"]),
+        ))
+
+    # 当前产量点
+    if factory["total_units"] > 0:
+        current_cost = FIXED_COST_MONTHLY + var_cost_per_unit_avg * factory["total_units"]
+        current_rev = avg_price * factory["total_units"]
+        fig_bep.add_trace(go.Scatter(
+            x=[factory["total_units"]], y=[current_cost],
+            mode="markers", name="当前成本",
+            marker=dict(symbol="circle", size=12, color=C["primary"]),
+        ))
+        fig_bep.add_trace(go.Scatter(
+            x=[factory["total_units"]], y=[current_rev],
+            mode="markers", name="当前收入",
+            marker=dict(symbol="circle", size=12, color=C["revenue"]),
+        ))
+
+    # 产能红线
+    fig_bep.add_vline(
+        x=MAX_CAPACITY_UNITS,
+        line=dict(color=C["capacity"], width=2.5, dash="dash"),
+        annotation_text=f"产能上限 {MAX_CAPACITY_UNITS:,.0f} 件",
+        annotation_position="top right",
+        annotation_font=dict(size=12, color=C["capacity"]),
+    )
+
+    # 超产能警告区域
+    if factory["capacity_util"] > 100:
+        fig_bep.add_vrect(
+            x0=MAX_CAPACITY_UNITS * 0.95,
+            x1=MAX_CAPACITY_UNITS * 1.05,
+            fillcolor="rgba(241, 143, 1, 0.15)",
+            layer="below",
+            line_width=0,
+        )
+
+    fig_bep.update_layout(
+        height=450,
+        hovermode="x unified",
+        xaxis=dict(title="产量 (件)", gridcolor=C["grid"],
+                   range=[0, max_x]),
+        yaxis=dict(title="金额 (元)", gridcolor=C["grid"]),
+        plot_bgcolor="white",
+        margin=dict(l=40, r=30, t=20, b=40),
+        legend=dict(orientation="h", y=1.1),
+    )
+
+    st.plotly_chart(fig_bep, use_container_width=True)
+
+    # 盈亏平衡说明
+    bep_status = "🟢 盈利" if factory["profit"] > 0 else ("🔴 亏损" if factory["profit"] < 0 else "🟡 盈亏平衡")
+    st.info(
+        f"**当前状态**: {bep_status} | "
+        f"实际产量 {factory['total_units']:,.0f} 件 vs BEP {factory['bep_units']:,.0f} 件 | "
+        f"安全边际 {(factory['total_units'] - factory['bep_units'])/factory['total_units']*100:.1f}%"
+        if factory['total_units'] > 0 and factory['bep_units'] != float("inf") and factory['total_units'] > factory['bep_units']
+        else f"**当前状态**: {bep_status} | 未达到盈亏平衡点"
+    )
+
+
+    # ════════════════════════════════════════════════════════════
+    # 卡片区 2：敏感度分析（Tornado Chart）
+    # ════════════════════════════════════════════════════════════
+    st.markdown("### 🔄 成本因素敏感度分析（±10%变动对利润影响）")
+    st.caption("以当前参数为基准，各成本因素单独变动±10%对月利润的影响程度")
+
+    # 基准利润
+    base_profit = factory["profit"]
+
+    # 分析5个因素
+    factors = {
+        "直接材料": {
+            "impact": lambda pct: calc_factory_level(margin_pct, vol_pct, mat_pct * (1 + pct/100))["profit"],
+            "pct_range": [-10, 10],
+        },
+        "直接人工": {
+            "impact": lambda pct: calc_factory_level(margin_pct, vol_pct, mat_pct)["profit"]
+            - (factory["total_units"] * DIRECT_LABOR_STD * (pct/100)),
+            "pct_range": [-10, 10],
+        },
+        "变动制造费用": {
+            "impact": lambda pct: calc_factory_level(margin_pct, vol_pct, mat_pct)["profit"]
+            - (factory["total_units"] * VAR_OH_STD * (pct/100)),
+            "pct_range": [-10, 10],
+        },
+        "固定成本": {
+            "impact": lambda pct: base_profit - (FIXED_COST_MONTHLY * (pct/100)),
+            "pct_range": [-10, 10],
+        },
+        "售价（毛利率）": {
+            "impact": lambda pct: calc_factory_level((margin_pct * (1 + pct/100)), vol_pct, mat_pct)["profit"],
+            "pct_range": [-10, 10],
+        },
     }
 
-factory = calc_factory_level(margin_pct, vol_pct, mat_pct)
-
-
-# ════════════════════════════════════════════════════════════
-# 卡片区 1：盈亏平衡分析
-# ════════════════════════════════════════════════════════════
-st.markdown("### 📉 盈亏平衡分析")
-
-# 盈亏平衡核心指标
-bep_col1, bep_col2, bep_col3, bep_col4 = st.columns(4)
-
-with bep_col1:
-    st.metric(
-        "盈亏平衡点（产量）",
-        f"{factory['bep_units']:,.0f}" if factory['bep_units'] != float("inf") else "∞",
-        delta=f"产能 {factory['bep_units']/MAX_CAPACITY_UNITS*100:.1f}%" if factory['bep_units'] != float("inf") else None,
-        help="达到此产量时盈亏平衡",
-    )
-
-with bep_col2:
-    st.metric(
-        "盈亏平衡点（收入）",
-        fmt_money(factory['bep_revenue']) if factory['bep_revenue'] != float("inf") else "∞",
-    )
-
-with bep_col3:
-    profit_color = "normal" if factory["profit"] >= 0 else "inverse"
-    st.metric(
-        "当月利润",
-        fmt_money(factory["profit"]),
-        delta=f"产量 {factory['total_units']:,.0f} 件",
-        delta_color=profit_color,
-    )
-
-with bep_col4:
-    util_color = "normal" if factory["capacity_util"] <= 100 else "inverse"
-    util_warning = ""
-    if factory["capacity_util"] > 110:
-        util_warning = "🔴 超红线"
-    elif factory["capacity_util"] > 100:
-        util_warning = "🟠 超产能"
-    st.metric(
-        "产能利用率",
-        f"{factory['capacity_util']:.1f}%",
-        delta=util_warning if util_warning else f"上限 {MAX_CAPACITY_UNITS:,.0f} 件",
-        delta_color=util_color,
-    )
-
-# 盈亏平衡图
-st.markdown("#### 盈亏平衡图")
-st.caption("总收入线 vs 总成本线，交点即为盈亏平衡点。红色竖线 = 产能上限")
-
-# 生成产量范围（0 ~ 产能上限×1.2）
-max_x = MAX_CAPACITY_UNITS * 1.2
-x_units = np.linspace(0, max_x, 200)
-
-# 总成本 = 固定成本 + 变动成本 × 产量
-var_cost_per_unit_avg = factory["total_variable_cost"] / factory["total_units"] if factory["total_units"] > 0 else 0
-total_cost_line = FIXED_COST_MONTHLY + var_cost_per_unit_avg * x_units
-
-# 总收入 = 售价 × 产量
-avg_price = factory["total_revenue"] / factory["total_units"] if factory["total_units"] > 0 else 0
-total_revenue_line = avg_price * x_units
-
-fig_bep = go.Figure()
-
-# 总成本线
-fig_bep.add_trace(go.Scatter(
-    x=x_units, y=total_cost_line,
-    mode="lines", name="总成本",
-    line=dict(color=C["negative"], width=2.5),
-))
-
-# 总收入线
-fig_bep.add_trace(go.Scatter(
-    x=x_units, y=total_revenue_line,
-    mode="lines", name="总收入",
-    line=dict(color=C["revenue"], width=2.5),
-))
-
-# 固定成本线
-fig_bep.add_trace(go.Scatter(
-    x=x_units, y=[FIXED_COST_MONTHLY] * len(x_units),
-    mode="lines", name=f"固定成本 ({fmt_money(FIXED_COST_MONTHLY)})",
-    line=dict(color=C["muted"], width=1.5, dash="dot"),
-))
-
-# 盈亏平衡点
-if factory["bep_units"] != float("inf") and factory["bep_units"] <= max_x:
-    bep_y = FIXED_COST_MONTHLY + var_cost_per_unit_avg * factory["bep_units"]
-    fig_bep.add_trace(go.Scatter(
-        x=[factory["bep_units"]], y=[bep_y],
-        mode="markers+text",
-        name=f"BEP ({factory['bep_units']:,.0f} 件)",
-        marker=dict(symbol="star", size=16, color=C["bep"],
-                    line=dict(width=2, color="white")),
-        text=["BEP"],
-        textposition="top center",
-        textfont=dict(size=14, color=C["bep"]),
-    ))
-
-# 当前产量点
-if factory["total_units"] > 0:
-    current_cost = FIXED_COST_MONTHLY + var_cost_per_unit_avg * factory["total_units"]
-    current_rev = avg_price * factory["total_units"]
-    fig_bep.add_trace(go.Scatter(
-        x=[factory["total_units"]], y=[current_cost],
-        mode="markers", name="当前成本",
-        marker=dict(symbol="circle", size=12, color=C["primary"]),
-    ))
-    fig_bep.add_trace(go.Scatter(
-        x=[factory["total_units"]], y=[current_rev],
-        mode="markers", name="当前收入",
-        marker=dict(symbol="circle", size=12, color=C["revenue"]),
-    ))
-
-# 产能红线
-fig_bep.add_vline(
-    x=MAX_CAPACITY_UNITS,
-    line=dict(color=C["capacity"], width=2.5, dash="dash"),
-    annotation_text=f"产能上限 {MAX_CAPACITY_UNITS:,.0f} 件",
-    annotation_position="top right",
-    annotation_font=dict(size=12, color=C["capacity"]),
-)
-
-# 超产能警告区域
-if factory["capacity_util"] > 100:
-    fig_bep.add_vrect(
-        x0=MAX_CAPACITY_UNITS * 0.95,
-        x1=MAX_CAPACITY_UNITS * 1.05,
-        fillcolor="rgba(241, 143, 1, 0.15)",
-        layer="below",
-        line_width=0,
-    )
-
-fig_bep.update_layout(
-    height=450,
-    hovermode="x unified",
-    xaxis=dict(title="产量 (件)", gridcolor=C["grid"],
-               range=[0, max_x]),
-    yaxis=dict(title="金额 (元)", gridcolor=C["grid"]),
-    plot_bgcolor="white",
-    margin=dict(l=40, r=30, t=20, b=40),
-    legend=dict(orientation="h", y=1.1),
-)
-
-st.plotly_chart(fig_bep, use_container_width=True)
-
-# 盈亏平衡说明
-bep_status = "🟢 盈利" if factory["profit"] > 0 else ("🔴 亏损" if factory["profit"] < 0 else "🟡 盈亏平衡")
-st.info(
-    f"**当前状态**: {bep_status} | "
-    f"实际产量 {factory['total_units']:,.0f} 件 vs BEP {factory['bep_units']:,.0f} 件 | "
-    f"安全边际 {(factory['total_units'] - factory['bep_units'])/factory['total_units']*100:.1f}%"
-    if factory['total_units'] > 0 and factory['bep_units'] != float("inf") and factory['total_units'] > factory['bep_units']
-    else f"**当前状态**: {bep_status} | 未达到盈亏平衡点"
-)
-
-
-# ════════════════════════════════════════════════════════════
-# 卡片区 2：敏感度分析（Tornado Chart）
-# ════════════════════════════════════════════════════════════
-st.markdown("### 🔄 成本因素敏感度分析（±10%变动对利润影响）")
-st.caption("以当前参数为基准，各成本因素单独变动±10%对月利润的影响程度")
-
-# 基准利润
-base_profit = factory["profit"]
-
-# 分析5个因素
-factors = {
-    "直接材料": {
-        "impact": lambda pct: calc_factory_level(margin_pct, vol_pct, mat_pct * (1 + pct/100))["profit"],
-        "pct_range": [-10, 10],
-    },
-    "直接人工": {
-        "impact": lambda pct: calc_factory_level(margin_pct, vol_pct, mat_pct)["profit"]
-        - (factory["total_units"] * DIRECT_LABOR_STD * (pct/100)),
-        "pct_range": [-10, 10],
-    },
-    "变动制造费用": {
-        "impact": lambda pct: calc_factory_level(margin_pct, vol_pct, mat_pct)["profit"]
-        - (factory["total_units"] * VAR_OH_STD * (pct/100)),
-        "pct_range": [-10, 10],
-    },
-    "固定成本": {
-        "impact": lambda pct: base_profit - (FIXED_COST_MONTHLY * (pct/100)),
-        "pct_range": [-10, 10],
-    },
-    "售价（毛利率）": {
-        "impact": lambda pct: calc_factory_level((margin_pct * (1 + pct/100)), vol_pct, mat_pct)["profit"],
-        "pct_range": [-10, 10],
-    },
-}
-
-tornado_data = []
-for name, config in factors.items():
-    profit_low = config["impact"](config["pct_range"][0])
-    profit_high = config["impact"](config["pct_range"][1])
-    impact_low = profit_low - base_profit
-    impact_high = profit_high - base_profit
-    # tornado chart 显示范围：从最小值到最大值
-    tornado_data.append({
-        "因素": name,
-        "下限": min(impact_low, impact_high),
-        "上限": max(impact_low, impact_high),
-        "影响幅度": max(abs(impact_low), abs(impact_high)),
-        "low_label": f"{fmt_money(profit_low)}",
-        "high_label": f"{fmt_money(profit_high)}",
-    })
-
-tornado_df = pd.DataFrame(tornado_data)
-tornado_df = tornado_df.sort_values("影响幅度", ascending=True)
-
-fig_tornado = go.Figure()
-
-# Tornado chart: 水平条形图，以基准为中线
-y_labels = tornado_df["因素"].tolist()
-
-fig_tornado.add_trace(go.Bar(
-    y=y_labels,
-    x=tornado_df["下限"],
-    orientation="h",
-    name="-10%（不利）",
-    marker_color=C["negative"],
-    text=tornado_df["low_label"],
-    textposition="outside",
-    hovertemplate="<b>%{y}</b><br>-10%: %{x:+,.0f} 元<extra></extra>",
-))
-
-fig_tornado.add_trace(go.Bar(
-    y=y_labels,
-    x=tornado_df["上限"],
-    orientation="h",
-    name="+10%（有利）",
-    marker_color=C["positive"],
-    text=tornado_df["high_label"],
-    textposition="outside",
-    hovertemplate="<b>%{y}</b><br>+10%: %{x:+,.0f} 元<extra></extra>",
-))
-
-# 基准线
-fig_tornado.add_vline(
-    x=0,
-    line=dict(color=C["primary"], width=1.5, dash="dash"),
-    annotation_text=f"基准利润 {fmt_money(base_profit)}",
-    annotation_position="top",
-    annotation_font=dict(size=11, color=C["primary"]),
-)
-
-fig_tornado.update_layout(
-    height=350,
-    barmode="relative",
-    hovermode="y unified",
-    xaxis=dict(title="利润变动 (元)", gridcolor=C["grid"]),
-    yaxis=dict(title="", gridcolor=C["grid"]),
-    plot_bgcolor="white",
-    margin=dict(l=40, r=30, t=20, b=40),
-    legend=dict(orientation="h", y=1.1),
-)
-
-st.plotly_chart(fig_tornado, use_container_width=True)
-
-# 敏感度排序表
-st.markdown("#### 敏感度排序（按影响幅度）")
-tornado_sort = tornado_df.sort_values("影响幅度", ascending=False)
-tornado_sort["影响幅度"] = tornado_sort["影响幅度"].apply(fmt_money)
-tornado_sort["下限"] = tornado_sort["low_label"]
-tornado_sort["上限"] = tornado_sort["high_label"]
-st.dataframe(
-    tornado_sort[["因素", "下限", "上限", "影响幅度"]].rename(
-        columns={"下限": "-10% 利润", "上限": "+10% 利润", "影响幅度": "影响幅度"}
-    ),
-    use_container_width=True, hide_index=True,
-)
-
-
-# ════════════════════════════════════════════════════════════
-# 卡片区 3：预测模拟
-# ════════════════════════════════════════════════════════════
-st.markdown("### 🔮 预测模拟")
-st.caption("基于三个输入参数，动态模拟工厂整体经营结果")
-
-# 模拟结果指标卡
-sim_col1, sim_col2, sim_col3, sim_col4 = st.columns(4)
-
-with sim_col1:
-    rev_per_unit = factory["total_revenue"] / factory["total_units"] if factory["total_units"] > 0 else 0
-    cost_per_unit = (factory["total_variable_cost"] + factory["total_fixed"]) / factory["total_units"] if factory["total_units"] > 0 else 0
-    actual_margin = (rev_per_unit - cost_per_unit) / rev_per_unit * 100 if rev_per_unit > 0 else 0
-    st.metric("实际毛利率", f"{actual_margin:.1f}%",
-              delta=f"目标 {margin_rate}%",
-              delta_color="inverse" if actual_margin < margin_pct * 100 else "normal")
-
-with sim_col2:
-    st.metric("总收入", fmt_money(factory["total_revenue"]),
-              help=f"产量 {factory['total_units']:,.0f} 件 × 均价 {fmt_money(avg_price)}")
-
-with sim_col3:
-    total_cost = factory["total_variable_cost"] + factory["total_fixed"]
-    st.metric("总成本", fmt_money(total_cost),
-              help=f"变动 {fmt_money(factory['total_variable_cost'])} + 固定 {fmt_money(factory['total_fixed'])}")
-
-with sim_col4:
-    profit_color = "normal" if factory["profit"] >= 0 else "inverse"
-    st.metric("净利润", fmt_money(factory["profit"]),
-              delta_color=profit_color)
-
-# 产线级详情
-st.markdown("#### 产线经营明细")
-line_summary = []
-for line_name in ["A1", "A2", "A3"]:
-    line_products = [p for p in factory["products"] if p["产线"] == line_name]
-    if line_products:
-        line_units = sum(p["实际产量"] for p in line_products)
-        line_rev = sum(p["收入"] for p in line_products)
-        line_var = sum(p["变动成本总额"] for p in line_products)
-        line_cm = sum(p["边际贡献总额"] for p in line_products)
-        line_std_vol = sum(p["标准产量"] for p in line_products)
-        line_util = line_units / (LINE_INFO[line_name]["hours"] / STD_HOURS_PER_UNIT) * 100
-        line_fix = line_units * FIX_OH_STD  # 分摊的固定制造费用
-        line_factory_fix = line_units * (FIXED_COST_MONTHLY / MAX_CAPACITY_UNITS)  # 工厂级分摊
-        line_profit = line_cm - line_factory_fix * line_units
-
-        line_summary.append({
-            "产线": line_name,
-            "设备数": LINE_INFO[line_name]["devices"],
-            "实际产量": f"{line_units:,.0f}",
-            "产能利用率": f"{line_util:.1f}%",
-            "收入": fmt_money(line_rev),
-            "变动成本": fmt_money(line_var),
-            "边际贡献": fmt_money(line_cm),
-            "分摊固定成本": fmt_money(line_fix),
+    tornado_data = []
+    for name, config in factors.items():
+        profit_low = config["impact"](config["pct_range"][0])
+        profit_high = config["impact"](config["pct_range"][1])
+        impact_low = profit_low - base_profit
+        impact_high = profit_high - base_profit
+        # tornado chart 显示范围：从最小值到最大值
+        tornado_data.append({
+            "因素": name,
+            "下限": min(impact_low, impact_high),
+            "上限": max(impact_low, impact_high),
+            "影响幅度": max(abs(impact_low), abs(impact_high)),
+            "low_label": f"{fmt_money(profit_low)}",
+            "high_label": f"{fmt_money(profit_high)}",
         })
 
-if line_summary:
-    st.dataframe(pd.DataFrame(line_summary), use_container_width=True, hide_index=True)
+    tornado_df = pd.DataFrame(tornado_data)
+    tornado_df = tornado_df.sort_values("影响幅度", ascending=True)
 
-# 产品级明细
-st.markdown("#### 产品经营明细")
-prod_summary = pd.DataFrame(factory["products"])
-prod_summary["售价"] = prod_summary["售价"].apply(fmt_money)
-prod_summary["变动成本"] = prod_summary["变动成本"].apply(lambda x: f"{x:,.2f}")
-prod_summary["边际贡献"] = prod_summary["边际贡献"].apply(lambda x: f"{x:,.2f}")
-prod_summary["收入"] = prod_summary["收入"].apply(fmt_money)
-prod_summary["边际贡献总额"] = prod_summary["边际贡献总额"].apply(fmt_money)
+    fig_tornado = go.Figure()
 
-st.dataframe(
-    prod_summary[["产品", "产线", "标准产量", "实际产量", "售价", "变动成本", "边际贡献", "收入", "边际贡献总额"]],
-    use_container_width=True, hide_index=True,
-)
+    # Tornado chart: 水平条形图，以基准为中线
+    y_labels = tornado_df["因素"].tolist()
 
-# 产能预警
-if factory["capacity_util"] > 100:
-    over_pct = factory["capacity_util"] - 100
-    if factory["capacity_util"] > 110:
-        st.error(f"🚨 **产能严重超限**: 当前产能利用率 {factory['capacity_util']:.1f}%，超出产能上限 {over_pct:.1f}%。"
-                 f"需关注设备过载风险和加班成本。")
+    fig_tornado.add_trace(go.Bar(
+        y=y_labels,
+        x=tornado_df["下限"],
+        orientation="h",
+        name="-10%（不利）",
+        marker_color=C["negative"],
+        text=tornado_df["low_label"],
+        textposition="outside",
+        hovertemplate="<b>%{y}</b><br>-10%: %{x:+,.0f} 元<extra></extra>",
+    ))
+
+    fig_tornado.add_trace(go.Bar(
+        y=y_labels,
+        x=tornado_df["上限"],
+        orientation="h",
+        name="+10%（有利）",
+        marker_color=C["positive"],
+        text=tornado_df["high_label"],
+        textposition="outside",
+        hovertemplate="<b>%{y}</b><br>+10%: %{x:+,.0f} 元<extra></extra>",
+    ))
+
+    # 基准线
+    fig_tornado.add_vline(
+        x=0,
+        line=dict(color=C["primary"], width=1.5, dash="dash"),
+        annotation_text=f"基准利润 {fmt_money(base_profit)}",
+        annotation_position="top",
+        annotation_font=dict(size=11, color=C["primary"]),
+    )
+
+    fig_tornado.update_layout(
+        height=350,
+        barmode="relative",
+        hovermode="y unified",
+        xaxis=dict(title="利润变动 (元)", gridcolor=C["grid"]),
+        yaxis=dict(title="", gridcolor=C["grid"]),
+        plot_bgcolor="white",
+        margin=dict(l=40, r=30, t=20, b=40),
+        legend=dict(orientation="h", y=1.1),
+    )
+
+    st.plotly_chart(fig_tornado, use_container_width=True)
+
+    # 敏感度排序表
+    st.markdown("#### 敏感度排序（按影响幅度）")
+    tornado_sort = tornado_df.sort_values("影响幅度", ascending=False)
+    tornado_sort["影响幅度"] = tornado_sort["影响幅度"].apply(fmt_money)
+    tornado_sort["下限"] = tornado_sort["low_label"]
+    tornado_sort["上限"] = tornado_sort["high_label"]
+    st.dataframe(
+        tornado_sort[["因素", "下限", "上限", "影响幅度"]].rename(
+            columns={"下限": "-10% 利润", "上限": "+10% 利润", "影响幅度": "影响幅度"}
+        ),
+        use_container_width=True, hide_index=True,
+    )
+
+
+    # ════════════════════════════════════════════════════════════
+    # 卡片区 3：预测模拟
+    # ════════════════════════════════════════════════════════════
+    st.markdown("### 🔮 预测模拟")
+    st.caption("基于三个输入参数，动态模拟工厂整体经营结果")
+
+    # 模拟结果指标卡
+    sim_col1, sim_col2, sim_col3, sim_col4 = st.columns(4)
+
+    with sim_col1:
+        rev_per_unit = factory["total_revenue"] / factory["total_units"] if factory["total_units"] > 0 else 0
+        cost_per_unit = (factory["total_variable_cost"] + factory["total_fixed"]) / factory["total_units"] if factory["total_units"] > 0 else 0
+        actual_margin = (rev_per_unit - cost_per_unit) / rev_per_unit * 100 if rev_per_unit > 0 else 0
+        st.metric("实际毛利率", f"{actual_margin:.1f}%",
+                  delta=f"目标 {margin_rate}%",
+                  delta_color="inverse" if actual_margin < margin_pct * 100 else "normal")
+
+    with sim_col2:
+        st.metric("总收入", fmt_money(factory["total_revenue"]),
+                  help=f"产量 {factory['total_units']:,.0f} 件 × 均价 {fmt_money(avg_price)}")
+
+    with sim_col3:
+        total_cost = factory["total_variable_cost"] + factory["total_fixed"]
+        st.metric("总成本", fmt_money(total_cost),
+                  help=f"变动 {fmt_money(factory['total_variable_cost'])} + 固定 {fmt_money(factory['total_fixed'])}")
+
+    with sim_col4:
+        profit_color = "normal" if factory["profit"] >= 0 else "inverse"
+        st.metric("净利润", fmt_money(factory["profit"]),
+                  delta_color=profit_color)
+
+    # 产线级详情
+    st.markdown("#### 产线经营明细")
+    line_summary = []
+    for line_name in ["A1", "A2", "A3"]:
+        line_products = [p for p in factory["products"] if p["产线"] == line_name]
+        if line_products:
+            line_units = sum(p["实际产量"] for p in line_products)
+            line_rev = sum(p["收入"] for p in line_products)
+            line_var = sum(p["变动成本总额"] for p in line_products)
+            line_cm = sum(p["边际贡献总额"] for p in line_products)
+            line_std_vol = sum(p["标准产量"] for p in line_products)
+            line_util = line_units / (LINE_INFO[line_name]["hours"] / STD_HOURS_PER_UNIT) * 100
+            line_fix = line_units * FIX_OH_STD  # 分摊的固定制造费用
+            line_factory_fix = line_units * (FIXED_COST_MONTHLY / MAX_CAPACITY_UNITS)  # 工厂级分摊
+            line_profit = line_cm - line_factory_fix * line_units
+
+            line_summary.append({
+                "产线": line_name,
+                "设备数": LINE_INFO[line_name]["devices"],
+                "实际产量": f"{line_units:,.0f}",
+                "产能利用率": f"{line_util:.1f}%",
+                "收入": fmt_money(line_rev),
+                "变动成本": fmt_money(line_var),
+                "边际贡献": fmt_money(line_cm),
+                "分摊固定成本": fmt_money(line_fix),
+            })
+
+    if line_summary:
+        st.dataframe(pd.DataFrame(line_summary), use_container_width=True, hide_index=True)
+
+    # 产品级明细
+    st.markdown("#### 产品经营明细")
+    prod_summary = pd.DataFrame(factory["products"])
+    prod_summary["售价"] = prod_summary["售价"].apply(fmt_money)
+    prod_summary["变动成本"] = prod_summary["变动成本"].apply(lambda x: f"{x:,.2f}")
+    prod_summary["边际贡献"] = prod_summary["边际贡献"].apply(lambda x: f"{x:,.2f}")
+    prod_summary["收入"] = prod_summary["收入"].apply(fmt_money)
+    prod_summary["边际贡献总额"] = prod_summary["边际贡献总额"].apply(fmt_money)
+
+    st.dataframe(
+        prod_summary[["产品", "产线", "标准产量", "实际产量", "售价", "变动成本", "边际贡献", "收入", "边际贡献总额"]],
+        use_container_width=True, hide_index=True,
+    )
+
+    # 产能预警
+    if factory["capacity_util"] > 100:
+        over_pct = factory["capacity_util"] - 100
+        if factory["capacity_util"] > 110:
+            st.error(f"🚨 **产能严重超限**: 当前产能利用率 {factory['capacity_util']:.1f}%，超出产能上限 {over_pct:.1f}%。"
+                     f"需关注设备过载风险和加班成本。")
+        else:
+            st.warning(f"⚠️ **产能超限警告**: 当前产能利用率 {factory['capacity_util']:.1f}%，超出产能上限 {over_pct:.1f}%。"
+                       f"建议关注设备负荷。")
+    elif factory["capacity_util"] > 85:
+        st.info(f"ℹ️ **产能利用率偏高**: {factory['capacity_util']:.1f}%，接近满产状态。")
     else:
-        st.warning(f"⚠️ **产能超限警告**: 当前产能利用率 {factory['capacity_util']:.1f}%，超出产能上限 {over_pct:.1f}%。"
-                   f"建议关注设备负荷。")
-elif factory["capacity_util"] > 85:
-    st.info(f"ℹ️ **产能利用率偏高**: {factory['capacity_util']:.1f}%，接近满产状态。")
-else:
-    st.info(f"ℹ️ **产能利用率**: {factory['capacity_util']:.1f}%，尚有 {100-factory['capacity_util']:.1f}% 产能空间。")
+        st.info(f"ℹ️ **产能利用率**: {factory['capacity_util']:.1f}%，尚有 {100-factory['capacity_util']:.1f}% 产能空间。")
 
-# 预测建议
-st.markdown("#### 情景建议")
-bep_ratio = factory["bep_units"] / MAX_CAPACITY_UNITS * 100 if factory["bep_units"] != float("inf") else 0
-suggestions = []
+    # 预测建议
+    st.markdown("#### 情景建议")
+    bep_ratio = factory["bep_units"] / MAX_CAPACITY_UNITS * 100 if factory["bep_units"] != float("inf") else 0
+    suggestions = []
 
-if factory["profit"] < 0:
-    suggestions.append("🔴 **当前亏损**：建议提高毛利率目标或降低材料成本")
-    suggestions.append(f"🟡 **BEP产能占比过高**：盈亏平衡点需占用 {bep_ratio:.1f}% 产能，经营杠杆风险较高")
-elif factory["profit"] > 0 and factory["profit"] < FIXED_COST_MONTHLY * 0.1:
-    suggestions.append("🟡 **利润微薄**：利润率不足固定成本的10%，建议优化成本结构")
-    suggestions.append(f"🟢 **已过BEP**：安全边际 {(factory['total_units'] - factory['bep_units'])/factory['total_units']*100:.1f}%")
+    if factory["profit"] < 0:
+        suggestions.append("🔴 **当前亏损**：建议提高毛利率目标或降低材料成本")
+        suggestions.append(f"🟡 **BEP产能占比过高**：盈亏平衡点需占用 {bep_ratio:.1f}% 产能，经营杠杆风险较高")
+    elif factory["profit"] > 0 and factory["profit"] < FIXED_COST_MONTHLY * 0.1:
+        suggestions.append("🟡 **利润微薄**：利润率不足固定成本的10%，建议优化成本结构")
+        suggestions.append(f"🟢 **已过BEP**：安全边际 {(factory['total_units'] - factory['bep_units'])/factory['total_units']*100:.1f}%")
 
-if factory["capacity_util"] > 100:
-    suggestions.append("🟠 **产能瓶颈**：考虑增加班次或外包部分产能")
-else:
-    suggestions.append(f"🟢 **产能充裕**：可承接 {100-factory['capacity_util']:.1f}% 的增量订单")
+    if factory["capacity_util"] > 100:
+        suggestions.append("🟠 **产能瓶颈**：考虑增加班次或外包部分产能")
+    else:
+        suggestions.append(f"🟢 **产能充裕**：可承接 {100-factory['capacity_util']:.1f}% 的增量订单")
 
-if mat_pct < 1.0:
-    suggestions.append("🟢 **材料成本下降**：当前材料价格低于标准，有利于利润提升")
-elif mat_pct > 1.0:
-    suggestions.append(f"🔴 **材料成本上升**：材料价格较标准上涨 {(mat_pct-1)*100:.0f}%，建议关注供应链风险")
+    if mat_pct < 1.0:
+        suggestions.append("🟢 **材料成本下降**：当前材料价格低于标准，有利于利润提升")
+    elif mat_pct > 1.0:
+        suggestions.append(f"🔴 **材料成本上升**：材料价格较标准上涨 {(mat_pct-1)*100:.0f}%，建议关注供应链风险")
 
-for s in suggestions:
-    st.markdown(s)
+    for s in suggestions:
+        st.markdown(s)
 
 
 # ─── 页脚 ──────────────────────────────────────────────
