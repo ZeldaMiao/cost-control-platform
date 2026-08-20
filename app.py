@@ -85,6 +85,10 @@ def load_data():
     dfs["mfg_cost"] = pd.read_csv(
         os.path.join(DATA_DIR, "manufacturing_cost_corrected.csv"), encoding="utf-8-sig"
     )
+    # BOM结构
+    dfs["bom"] = pd.read_csv(
+        os.path.join(DATA_DIR, "bom_structure_v2.csv"), encoding="utf-8-sig"
+    )
     return dfs
 
 dfs = load_data()
@@ -92,6 +96,7 @@ std_df = dfs["standard"]
 act_df = dfs["actual"]
 var_df = dfs["variance"]
 mfg_df = dfs["mfg_cost"]
+bom_df = dfs["bom"]
 
 # 标准成本去重（文件有重复行）
 std_df = std_df.drop_duplicates(subset=["产品名称", "产线"]).reset_index(drop=True)
@@ -136,6 +141,115 @@ def fmt_money(val):
 
 def fmt_pct(val):
     return f"{val:+.1f}%" if val != 0 else f"{val:.1f}%"
+
+
+# ─── BOM树解析与半成品成本计算 ─────────────────────────────
+@st.cache_data
+def calc_semi_finished_costs(bom_df, product_name, std_map):
+    """
+    基于BOM结构计算半成品节点的材料成本完工率。
+    返回各工序节点数据，含材料消耗占比和完工率估计。
+    """
+    # 找到该产品的根物料号
+    prod_rows = bom_df[bom_df["产品名称"] == product_name]
+    if len(prod_rows) == 0:
+        return [], None
+    
+    root_mat_no = prod_rows.iloc[0]["物料号(母件)"]
+    
+    # 构建父→子映射
+    parent_map = {}
+    for _, row in bom_df.iterrows():
+        p = row["物料号(母件)"]
+        if p not in parent_map:
+            parent_map[p] = []
+        parent_map[p].append({
+            "child": row["组件号(子件)"],
+            "name": row["材料名称"],
+            "qty": row["材料用量"],
+            "parent_name": row["产品名称"],
+        })
+    
+    # 收集所有叶子节点（原材料）和半成品节点
+    raw_materials = {}
+    semi_nodes = []
+    
+    def collect_tree(parent, visited):
+        if parent in visited:
+            return
+        visited.add(parent)
+        children = parent_map.get(parent, [])
+        for child in children:
+            if child["child"] not in parent_map:
+                # 叶子节点→原材料
+                raw_materials[child["child"]] = {
+                    "name": child["name"], "qty": child["qty"]
+                }
+            else:
+                if "(半)" in child["name"]:
+                    semi_nodes.append({
+                        "node": child["child"],
+                        "name": child["name"],
+                        "parent_name": child["parent_name"],
+                    })
+                collect_tree(child["child"], visited)
+    
+    collect_tree(root_mat_no, set())
+    
+    if not raw_materials:
+        return [], None
+    
+    total_raw_qty = sum(r["qty"] for r in raw_materials.values())
+    
+    # 判断节点是否在到目标的路径上
+    def is_on_path_to_target(node, target, visited):
+        if node in visited:
+            return False
+        visited.add(node)
+        if node == target:
+            return True
+        for child in parent_map.get(node, []):
+            if is_on_path_to_target(child["child"], target, visited):
+                return True
+        return False
+    
+    # 计算半成品节点前的上游材料消耗
+    stage_data = []
+    for sn in semi_nodes:
+        upstream_qty = 0
+        def calc_upstream(parent, target, visited):
+            qty = 0
+            if parent in visited:
+                return 0
+            visited.add(parent)
+            children = parent_map.get(parent, [])
+            for child in children:
+                if child["child"] == target:
+                    continue  # 找到目标，不计入该节点材料
+                if child["child"] not in parent_map:
+                    # 叶子节点 → 加入
+                    qty += child["qty"]
+                else:
+                    # 检查子节点是否在通往目标的路径上
+                    v2 = set()
+                    if is_on_path_to_target(child["child"], target, v2):
+                        qty += calc_upstream(child["child"], target, visited)
+                    else:
+                        qty += child["qty"]
+            return qty
+        
+        upstream_qty = calc_upstream(root_mat_no, sn["node"], set())
+        mat_pct = upstream_qty / total_raw_qty * 100 if total_raw_qty > 0 else 0
+        
+        stage_data.append({
+            "name": sn["name"],
+            "parent_name": sn["parent_name"],
+            "upstream_qty": upstream_qty,
+            "total_qty": total_raw_qty,
+            "mat_completion_pct": mat_pct,
+        })
+    
+    return stage_data, {"total_raw_qty": total_raw_qty, "raw_count": len(raw_materials)}
 
 
 # ─── 侧边栏 ──────────────────────────────────────────────
@@ -529,6 +643,240 @@ with tab2:
                 delta=f"{'⬆' if impact > 0 else '⬇'} {fmt_money(abs(impact))}")
     col3.metric("模拟后总成本", fmt_money(new_total),
                 delta=f"{'⬆' if impact > 0 else '⬇'} {fmt_money(abs(impact))}")
+
+
+    # ════════════════════════════════════════════════════════════
+    # 新增：半成品成本与WIP在制品模拟
+    # ════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### 📦 半成品成本与WIP在制品模拟")
+    st.caption("基于BOM结构识别各工序半成品节点，计算材料成本完工率，并模拟在制品(WIP)对单位成本的影响")
+
+    # 计算半成品数据
+    sf_data, bom_info = calc_semi_finished_costs(bom_df, selected_product, std_map)
+
+    if sf_data and bom_info:
+        s = std_map[selected_product]
+
+        # ── 工序结构图 ──
+        st.markdown("#### 工序划分与BOM成本积累")
+        st.caption(f"该产品BOM含 {bom_info['raw_count']} 种原材料，总材料用量 {bom_info['total_raw_qty']:.2f} 单位")
+
+        # 工序流程说明
+        process_stages = [
+            ("① 基材成型", "骨架/基体注塑成型", "材料消耗约 30-50%"),
+            ("② 覆面层加工", "表皮/包覆/隔音层贴合", "材料消耗约 15-25%"),
+            ("③ 半成品组装", "紧固件/嵌件/面料装配", "半成品节点完工"),
+            ("④ 总成检验", "功能检测+包装入库", "成品完工"),
+        ]
+
+        stage_cols = st.columns(4)
+        for i, (stage_name, stage_desc, stage_mat) in enumerate(process_stages):
+            with stage_cols[i]:
+                if i == 2:  # 半成品节点高亮
+                    pct = sf_data[0]["mat_completion_pct"]
+                    st.markdown(
+                        f"""<div style="background:#E8F4FD; border:2px solid {C['secondary']};
+                        border-radius:8px; padding:10px; text-align:center;">
+                        <b style="color:{C['primary']}">{stage_name}</b><br>
+                        <span style="font-size:0.8rem;color:{C['muted']}">{stage_desc}</span><br>
+                        <span style="color:{C['secondary']};font-weight:bold;font-size:1.1rem;">
+                        材料完工 {pct:.1f}%</span>
+                        </div>""", unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        f"""<div style="background:#F5F7FA; border:1px solid {C['grid']};
+                        border-radius:8px; padding:10px; text-align:center;">
+                        <b style="color:{C['muted']}">{stage_name}</b><br>
+                        <span style="font-size:0.8rem;color:{C['muted']}">{stage_desc}</span><br>
+                        <span style="font-size:0.8rem;color:gray;">{stage_mat}</span>
+                        </div>""", unsafe_allow_html=True,
+                    )
+
+        # ── 半成品成本明细表 ──
+        st.markdown("#### 半成品节点成本明细")
+
+        # 计算各工序的成本
+        mat_completion = sf_data[0]["mat_completion_pct"] / 100
+        # 制造过程按4个阶段均分转换成本（人工+制造费用）
+        conv_to_stage3 = 0.75  # 3/4的转换工序已完成
+
+        # 半成品节点成本
+        semi_material = s["material"] * mat_completion
+        semi_labor = s["labor"] * conv_to_stage3
+        semi_var_oh = s["var_oh"] * conv_to_stage3
+        semi_fix_oh = s["fix_oh"] * conv_to_stage3
+        semi_total = semi_material + semi_labor + semi_var_oh + semi_fix_oh
+
+        cost_rows = [
+            {
+                "成本项目": "直接材料",
+                "成品成本(元)": f"{s['material']:,.2f}",
+                "半成品(元)": f"{semi_material:,.2f}",
+                "完工率": f"{mat_completion*100:.1f}%",
+                "说明": f"半成品节点前已消耗 {sf_data[0]['upstream_qty']:.0f}/{sf_data[0]['total_qty']:.0f} 材料用量单位",
+            },
+            {
+                "成本项目": "直接人工",
+                "成品成本(元)": f"{s['labor']:,.2f}",
+                "半成品(元)": f"{semi_labor:,.2f}",
+                "完工率": "75.0%",
+                "说明": "4道工序中已完成3道（基材→覆面→组装）",
+            },
+            {
+                "成本项目": "变动制造费用",
+                "成品成本(元)": f"{s['var_oh']:,.2f}",
+                "半成品(元)": f"{semi_var_oh:,.2f}",
+                "完工率": "75.0%",
+                "说明": "按工序进度同比例分摊",
+            },
+            {
+                "成本项目": "固定制造费用",
+                "成品成本(元)": f"{s['fix_oh']:,.2f}",
+                "半成品(元)": f"{semi_fix_oh:,.2f}",
+                "完工率": "75.0%",
+                "说明": "按工序进度同比例分摊",
+            },
+            {
+                "成本项目": "合计",
+                "成品成本(元)": f"{s['total']:,.2f}",
+                "半成品(元)": f"{semi_total:,.2f}",
+                "完工率": f"{semi_total/s['total']*100:.1f}%",
+                "说明": "半成品单位成本 vs 成品单位成本",
+            },
+        ]
+        st.dataframe(pd.DataFrame(cost_rows), use_container_width=True, hide_index=True)
+
+        # 半成品成本结构图
+        fig_semi = go.Figure()
+        fig_semi.add_trace(go.Bar(
+            name="成品", x=["直接材料", "直接人工", "变动制造费", "固定制造费"],
+            y=[s["material"], s["labor"], s["var_oh"], s["fix_oh"]],
+            marker_color=[C["material"], C["labor"], C["var_oh"], C["fix_oh"]],
+            text=[fmt_money(v) for v in [s["material"], s["labor"], s["var_oh"], s["fix_oh"]]],
+            textposition="outside", opacity=0.6,
+        ))
+        fig_semi.add_trace(go.Bar(
+            name="半成品", x=["直接材料", "直接人工", "变动制造费", "固定制造费"],
+            y=[semi_material, semi_labor, semi_var_oh, semi_fix_oh],
+            marker_color=[C["material"], C["labor"], C["var_oh"], C["fix_oh"]],
+            text=[fmt_money(v) for v in [semi_material, semi_labor, semi_var_oh, semi_fix_oh]],
+            textposition="outside",
+        ))
+        fig_semi.update_layout(
+            height=300, barmode="group",
+            hovermode="x unified",
+            xaxis=dict(title="", gridcolor=C["grid"]),
+            yaxis=dict(title="单件成本 (元)", gridcolor=C["grid"]),
+            plot_bgcolor="white", margin=dict(l=40, r=20, t=20, b=40),
+            legend=dict(orientation="h", y=1.1),
+        )
+        st.plotly_chart(fig_semi, use_container_width=True)
+
+        # ── WIP在制品模拟 ──
+        st.markdown("#### WIP在制品模拟")
+        st.caption("设定在制品数量和完工进度，模拟对单位成本的影响（参考半成品成本结构）")
+
+        wip_col1, wip_col2 = st.columns(2)
+        with wip_col1:
+            wip_qty = st.number_input(
+                "在制品数量（件）", min_value=0, max_value=50000,
+                value=int(s["std_vol"] * 0.3), step=100,
+                help="月末盘点在制品数量",
+            )
+        with wip_col2:
+            # 默认完工率 = 半成品成本完工率，用户可调
+            default_completion = round(semi_total / s["total"] * 100)
+            wip_completion = st.slider(
+                "在制品平均完工率（%）", 5, 95, default_completion, 5,
+                help=f"BOM推算参考值: 材料 {mat_completion*100:.0f}% / 转换成本 75%",
+            )
+
+        wip_pct = wip_completion / 100
+
+        # 计算约当产量
+        if len(prod_act) > 0:
+            latest = prod_act.iloc[-1]
+            actual_vol = latest["实际产量"]
+            equiv_units = wip_qty * wip_pct
+            total_equiv = actual_vol + equiv_units
+
+            if total_equiv > 0:
+                total_cost = latest["月实际总成本"]
+                cost_per_unit_no_wip = s["total"]
+                cost_per_unit_with_wip = total_cost / total_equiv
+
+                wip_c1, wip_c2, wip_c3, wip_c4 = st.columns(4)
+                with wip_c1:
+                    st.metric("完工产量", f"{actual_vol:,.0f}")
+                with wip_c2:
+                    st.metric("在制品数量", f"{wip_qty:,.0f}",
+                              delta=f"完工率 {wip_completion}% → 约当 {equiv_units:,.0f} 件")
+                with wip_c3:
+                    st.metric("总约当产量", f"{total_equiv:,.0f}",
+                              delta=f"+ {equiv_units:,.0f} WIP约当")
+                with wip_c4:
+                    delta_amt = cost_per_unit_with_wip - cost_per_unit_no_wip
+                    st.metric("调整后单位成本", fmt_money(cost_per_unit_with_wip),
+                              delta=f"{'⬇' if delta_amt < 0 else '⬆'} {fmt_money(abs(delta_amt))} vs 标准",
+                              delta_color="inverse" if delta_amt > 0 else "normal")
+
+                # WIP影响说明
+                wip_impact = (cost_per_unit_with_wip - cost_per_unit_no_wip) / cost_per_unit_no_wip * 100
+                st.info(
+                    f"**WIP影响分析**: 考虑在制品后，单位成本从 {fmt_money(cost_per_unit_no_wip)} "
+                    f"{'下降' if wip_impact < 0 else '上升'} {abs(wip_impact):.1f}% 至 "
+                    f"{fmt_money(cost_per_unit_with_wip)}。"
+                    f"WIP约当 {equiv_units:,.0f} 件占总约当产量 {total_equiv:,.0f} 件的 "
+                    f"{equiv_units/total_equiv*100:.1f}%。"
+                    if wip_impact != 0 else
+                    f"**WIP影响分析**: WIP对单位成本无显著影响"
+                )
+
+                # 完工率敏感度曲线
+                if wip_qty > 0:
+                    st.markdown("##### 不同完工率下的单位成本")
+                    completion_range = list(range(5, 100, 5))
+                    costs = []
+                    for pct in completion_range:
+                        eq = wip_qty * pct / 100
+                        costs.append(total_cost / (actual_vol + eq) if (actual_vol + eq) > 0 else 0)
+
+                    fig_wip = go.Figure()
+                    fig_wip.add_trace(go.Scatter(
+                        x=completion_range, y=costs,
+                        mode="lines+markers",
+                        name="单位成本 vs 完工率",
+                        line=dict(color=C["secondary"], width=2.5),
+                        marker=dict(size=6),
+                    ))
+                    fig_wip.add_hline(
+                        y=cost_per_unit_no_wip,
+                        line=dict(color=C["muted"], width=1.5, dash="dash"),
+                        annotation_text=f"不含WIP: {fmt_money(cost_per_unit_no_wip)}",
+                        annotation_position="top right",
+                    )
+                    fig_wip.add_vline(
+                        x=wip_completion,
+                        line=dict(color=C["accent"], width=2, dash="dot"),
+                        annotation_text=f"当前: {wip_completion}%",
+                        annotation_position="bottom",
+                    )
+                    fig_wip.update_layout(
+                        height=280,
+                        hovermode="x unified",
+                        xaxis=dict(title="在制品完工率 (%)", gridcolor=C["grid"]),
+                        yaxis=dict(title="单位成本 (元)", gridcolor=C["grid"]),
+                        plot_bgcolor="white", margin=dict(l=40, r=20, t=20, b=40),
+                    )
+                    st.plotly_chart(fig_wip, use_container_width=True)
+            else:
+                st.info("当前产品无实际产量数据，无法进行WIP模拟")
+        else:
+            st.info("当前产品无实际产量数据，无法进行WIP模拟")
+    else:
+        st.info("当前产品在BOM中未找到半成品结构数据")
 
 
 with tab3:
